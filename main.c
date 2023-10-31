@@ -7,22 +7,81 @@
 #include <ctype.h>
 #include <stdbool.h>
 #include <string.h>
+#include <sys/types.h>
+#include <dirent.h>
+
 
 #define TEXT_CAP 1024 
 #define TOKEN_CAP 256
 #define PUTBACK_LEN 32
 #define ARRLEN(arr) (sizeof arr / sizeof arr[0])
 
-
 typedef struct {
-    char contant[TEXT_CAP];
+    char content[TEXT_CAP];
     size_t idx;
 } Text;
 
 typedef struct{
-    unsigned char token[TOKEN_CAP];
-    size_t idx;
+    char *token;
+    size_t count;
 } Token;
+
+typedef struct{
+    Token token;
+    size_t value;
+    bool ocuppied;
+} Tokenfreq;
+
+typedef struct{
+    char path[256];
+} Path;
+
+typedef struct{
+    Path *items;
+    size_t count;
+    size_t capacity;
+} Dires;
+typedef struct{
+    Tokenfreq *items;
+    size_t count;
+    size_t capacity;
+} Tokenfreqs;
+
+#define DA_INIT_CAP 256
+#define da_append(da, item)                                                          \
+    do {                                                                                 \
+        if ((da)->count >= (da)->capacity) {                                             \
+            (da)->capacity = (da)->capacity == 0 ? DA_INIT_CAP : (da)->capacity*2;   \
+            (da)->items = realloc((da)->items, (da)->capacity*sizeof(*(da)->items)); \
+            assert((da)->items != NULL);                       \
+        }                                                                                \
+                                                                                         \
+        (da)->items[(da)->count++] = (item);                                             \
+    } while (0)
+
+
+
+bool token_eq(Token a, Token b){
+    if(a.count != b.count) return false;
+    else{
+       return memcmp(a.token, b.token, a.count) == 0;
+    }
+}
+
+uint32_t djb2(uint8_t *buf, size_t buf_size)
+{
+    uint32_t hash = 5381;
+
+    for (size_t i = 0; i < buf_size; ++i) {
+        hash = ((hash << 5) + hash) + (uint32_t)buf[i]; /* hash * 33 + c */
+    }
+
+    return hash;
+}
+
+
+
+
 
 Text text = {.idx = 0};
 size_t clen = 0;
@@ -41,7 +100,7 @@ int parse_xhtml(FILE *file){
         else if(c == '>'){
             in_tag = false;
             if (end_tag){
-                text.contant[text.idx]= '\0';
+                text.content[text.idx]= '\0';
                 return 0; // return 0 if end tag
             }
         }
@@ -49,7 +108,7 @@ int parse_xhtml(FILE *file){
             if(!isspace(c) || !left_space){
                 if(left_space) left_space = false;
                 
-                text.contant[text.idx]= c;
+                text.content[text.idx]= c;
                 assert(text.idx < TEXT_CAP);
                 text.idx++;
             }
@@ -66,79 +125,167 @@ int read_next_tag(FILE *file){
     return c; // if no more tags 
 }
 
-char putback[PUTBACK_LEN] = {0};
-size_t putback_idx = 0;
 
 Token read_alpha(){
-    int c = text.contant[clen];
-    Token token = {.idx = 0};
+    int c = text.content[clen];
+    Token token = {.count = 0};
+    char* tmp = malloc(sizeof(char)*TOKEN_CAP);
     while(isalpha(c) || isdigit(c) || c == '_'){
-        token.token[token.idx] = c;
-        assert(token.idx < TOKEN_CAP);
-        token.idx++;
+        tmp[token.count] = toupper(c);
+        assert(token.count < TOKEN_CAP);
+        token.count++;
         clen++;
-        c = text.contant[clen];
+        c = text.content[clen];
     }
-    return token;
+    token.token = tmp;
+    return  token ;
 }
 
 Token read_number(){
-    int c = text.contant[clen];
-    Token token = {.idx = 0};
+    int c = text.content[clen];
+    Token token = {.count = 0};
+    char* tmp = malloc(sizeof(char)*TOKEN_CAP);
     while(isdigit(c)){
-        token.token[token.idx] = c;
-        assert(token.idx < TOKEN_CAP);
-        token.idx++;
+        tmp[token.count] = c;
+        assert(token.count < TOKEN_CAP);
+        token.count++;
         clen++;
-        c = text.contant[clen];
+        c = text.content[clen];
         if(c == '.'){
-            if(!isdigit(text.contant[clen+1]))
+            if(!isdigit(text.content[clen+1]))
                 continue;
-            token.token[token.idx] = c;
-            assert(token.idx < TOKEN_CAP);
-            token.idx++;
+            tmp[token.count] = c;
+            assert(token.count < TOKEN_CAP);
+            token.count++;
             clen++;
-            c = text.contant[clen];
+            c = text.content[clen];
         }
     }
+    token.token = tmp;
     return token;
 }
 
-Token lexer(){
-    uint8_t c= text.contant[clen]; 
-    Token token = {.idx =0};
-
-    while(isspace(c)){
-        clen++;
-        c = text.contant[clen];
+bool hm_append(Tokenfreqs *map, Token token){
+    // gorw map if needed 
+    if(map->count >= map->capacity * 0.75){
+        map->capacity = map->capacity == 0 ? DA_INIT_CAP : map->capacity*2;
+        map->items = realloc(map->items, map->capacity*sizeof(*map->items));
+        assert(map->items != NULL);
+        memset(map->items, 0, map->capacity*sizeof(*map->items));
     }
-
-    if(isalpha(c)) token = read_alpha();
-    else if(isdigit(c)) token = read_number();
-    else {
-        token.token[token.idx] = c;
-        assert(token.idx < TOKEN_CAP);
-        token.idx++;
-        clen++;
+    uint32_t h = djb2((uint8_t*)token.token, token.count)% map->capacity;;
+    for(size_t i = 0; i< map->capacity && map->items[h].ocuppied && !token_eq(map->items[h].token, token); i++){
+        h = (h+1)% map->capacity;
     }
-
-    return token;
+    Tokenfreq *slot = &map->items[h];
+    if(slot->ocuppied){
+        if(!token_eq(slot->token, token)){
+            fprintf(stderr, "table overflow\n");
+            return false;
+        }
+        slot->value +=1;
+    }else{
+        slot->token = token;
+        slot->value = 1;
+        slot->ocuppied = true;
+    }
+    return true;
 }
 
+Tokenfreqs map = {0};
 
-int main(void){
-    FILE *file = fopen("./docs.gl/el3/cos.xhtml", "r");  
-    int c; 
-    while((c = read_next_tag(file)) != EOF){
-        Token token = lexer();
-        printf("%s\n", token.token);
-        memset(token.token, 0, sizeof token.token);
-        memset(text.contant, 0, sizeof text.contant);
-        token.idx = 0;
+void lexer(FILE *file){
+    char c= text.content[clen]; 
+    Token token = {.count =0};
+    int a;
+    while((a = read_next_tag(file)) != EOF){
+        while(text.idx > clen){
+            c = text.content[clen]; 
+            while(isspace(c)){
+                clen++;
+                c = text.content[clen];
+            }
+
+            if(isalpha(c)) {
+                token = read_alpha();
+            }
+            else if(isdigit(c)){
+                token = read_number();
+            }
+            else clen++;
+
+            if(token.count > 0){
+                hm_append(&map, token);
+                token.count = 0;
+            }
+
+        }
+        memset(text.content, 0, sizeof text.content); 
         text.idx = 0;
         clen = 0;
     }
+}
 
+int compare_tokenfreq(const void *a, const void *b){
+    Tokenfreq *ta = (Tokenfreq*)a;
+    Tokenfreq *tb = (Tokenfreq*)b;
+    return (int)tb->value - (int)ta->value;
+}
+
+void file_dump(FILE *file){
+    lexer(file);
+    Tokenfreqs freq = {0};
+    for(size_t i =0 ; i <map.capacity; i++){
+        if(map.items[i].ocuppied){
+            da_append(&freq, map.items[i]);
+        }
+    }
+    qsort(freq.items, freq.count, sizeof(Tokenfreq),compare_tokenfreq);
+    for(size_t i =0 ; i <freq.count; i++){
+        printf("%s: %zu\n", freq.items[i].token.token, freq.items[i].value);
+    }
+}
+char *join_path(const char *path, char *name){
+    char *result = malloc(strlen(path) + strlen(name) + 2);
+    strcpy(result, path);
+    strcat(result, "/");
+    strcat(result, name);
+    return result;
+}
+
+Dires dires = {0};
+// open dire and put all pathes in dires recursively
+void read_entire_dir(const char *path){
+    DIR *dir;
+    struct dirent *ent;
+    if ((dir = opendir (path)) != NULL) {
+        while ((ent = readdir (dir)) != NULL) {
+            if(strcmp(ent->d_name, ".") == 0 || strcmp(ent->d_name, "..") == 0) continue;
+            if(ent->d_type == DT_DIR){
+                char *new_path = join_path(path, ent->d_name);
+                read_entire_dir(new_path);
+                free(new_path);
+            }else{
+                char *new_path = join_path(path, ent->d_name);
+                Path path = {0} ;
+                strcpy(path.path, new_path);
+                da_append(&dires, path);
+            }
+        }
+        closedir (dir);
+    } else {
+        /* could not open directory */
+        perror ("");
+        return;
+    }
+}
+
+int main(void){
+    FILE *file = fopen("./docs.gl/el3/textureProjGradOffset.xhtml", "r");  
+    read_entire_dir("./docs.gl");
+    for(size_t i = 0; i < dires.count; i++){
+        printf("%s\n", dires.items[i].path);
+    }
     fclose(file);
     return 0;
 }
