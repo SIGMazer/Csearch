@@ -13,7 +13,7 @@
 #include <wchar.h>
 
 
-#define TEXT_CAP 1024 *10
+#define TEXT_CAP 1024 *5
 #define TOKEN_CAP 256
 #define PUTBACK_LEN 32
 #define ARRLEN(arr) (sizeof arr / sizeof arr[0])
@@ -75,7 +75,7 @@ typedef struct{
     size_t capacity;
 } Ranks;
 
-#define DA_INIT_CAP (1024 * 100) 
+#define DA_INIT_CAP (512) 
 #define da_append(da, item)                                                          \
     do {                                                                                 \
         if ((da)->count >= (da)->capacity) {                                             \
@@ -325,16 +325,8 @@ void indexing(Dires dires, Indexs *indexs){
         fclose(file);
     }
 }
-double tf(char* term, Dires dires, Indexs indexs){
-    size_t termCount =0;
-    for(size_t i = 0; i < dires.count; i++){
-        Tokenfreqs freq = {0};
-        index_get(indexs, dires.items[i], &freq);
-        size_t value = 0;
-        freq_get(&freq, (Token){.token = term,.count=strlen(term)}, &value);
-        termCount += value;
-    }
-    return (double)termCount/(double)dires.count;
+double tf(Tokenfreqs freqs, size_t freq){
+    return (double)freq/(double)freqs.count;
 }
 double idf(char* term,Dires dires,  Indexs indexs){
     size_t termCount =0;
@@ -365,7 +357,7 @@ void searchandrankdoc(Tokenfreqs *query, Dires dires, Indexs indexs, Ranks *resu
                 size_t value = 0;
                 freq_get(&freq, query->items[j].token, &value);
                 if(value > 0){
-                    double tfidf = tf(query->items[j].token.token, dires, indexs) * idf(query->items[j].token.token, dires, indexs);
+                    double tfidf = tf(freq, value) * idf(query->items[j].token.token, dires, indexs);
                     score += tfidf;
                 }
                 Rank rank = {0};
@@ -379,27 +371,40 @@ void searchandrankdoc(Tokenfreqs *query, Dires dires, Indexs indexs, Ranks *resu
 }
 
 int main(void){
-    FILE *file = fopen("./docs.gl/el3/textureProjGradOffset.xhtml", "r");  
     Dires dires = {0};
-    read_entire_dir("./docs.gl/sl4/", &dires);
-    Tokenfreqs query = {0};
-    Text_builder tb = {0};
-    Text tmp = {0};
-    strcpy(tmp.content, "leaner interpolation");
-    tmp.count = strlen(tmp.content);
-    da_append(&tb, tmp);
-    lexer(tb, &query);
-
+    read_entire_dir("./docs.gl/el3", &dires);
+    read_entire_dir("./docs.gl/sl4", &dires);
     Indexs indexs = {0};
     indexing(dires, &indexs);
 
-    Ranks ranks = {0};
-    
-    puts("search result:");
-    searchandrankdoc(&query, dires, indexs, &ranks);
-    for(size_t i = 0; i < 10; i++){
-        if(ranks.items[i].score > 0)
-            printf("\t%s\n", ranks.items[i].path.path );
+    puts("indexing done");
+    while(true){
+        Tokenfreqs query = {0};
+        Text_builder tb = {0};
+        Text tmp = {0};
+        char buf[256];
+        Ranks ranks = {0};
+
+        puts("++++++++++++++++++++++++++++++++++++++++++++++++");
+
+        printf("search: ");
+        fgets(buf, 256, stdin);
+        strcpy(tmp.content, buf);
+        tmp.count = strlen(tmp.content);
+        da_append(&tb, tmp);
+        lexer(tb, &query);
+
+
+
+        puts("++++++++++++++++++++++++++++++++++++++++++++++++");
+        puts("search result:");
+        searchandrankdoc(&query, dires, indexs, &ranks);
+        for(size_t i = 0; i < ranks.count; i++){
+            if(ranks.items[i].score > 0)
+                printf("\t%s\n", ranks.items[i].path.path );
+            else break;
+        }
+
     }
     // for(size_t i = 0; i < dires.count; i++){
     //     printf("%s\n", dires.items[i].path);
@@ -423,6 +428,5 @@ int main(void){
     //     printf("%s: %zu\n", freq.items[i].token.token, freq.items[i].value);
     // }
 
-    fclose(file);
     return 0;
 }
