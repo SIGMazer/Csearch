@@ -408,9 +408,16 @@ void searchandrankdoc(Tokenfreqs *query, Dires dires, Indexs indexs, Ranks *resu
     qsort(result->items, result->count, sizeof(Rank), compare_score);
 }
 
-int main(void){
+int main(int argc, char **argv){
+    
+    if(argc != 2){
+        fprintf(stderr, "usage: %s <dir>\n", argv[0]);
+        return 1;
+    }
+    char *dir_path = argv[1];
+
     Dires dires = {0};
-    read_entire_dir("./docs.gl", &dires);
+    read_entire_dir(dir_path, &dires);
     Indexs indexs = {0};
     indexing(dires, &indexs);
 
