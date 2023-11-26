@@ -6,3 +6,8 @@ simple local search engine
 $ make
 $ csearch <dir>
 ```
+to open engine in browser
+```console
+
+csearch serve <dir>
+```

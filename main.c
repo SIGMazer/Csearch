@@ -12,6 +12,11 @@
 #include <dirent.h>
 #include <math.h>
 #include <wchar.h>
+#include <unistd.h>
+#include <arpa/inet.h>
+#include <sys/stat.h>
+#include <fcntl.h>
+#include <ctype.h>
 
 
 #define TEXT_CAP 1024 *5
@@ -76,6 +81,9 @@ typedef struct{
     size_t count;
     size_t capacity;
 } Ranks;
+
+Dires dires = {0};
+Indexs indexs = {0};
 
 #define DA_INIT_CAP (256) 
 #define da_append(da, item)                                                          \
@@ -408,80 +416,268 @@ void searchandrankdoc(Tokenfreqs *query, Dires dires, Indexs indexs, Ranks *resu
     }
     qsort(result->items, result->count, sizeof(Rank), compare_score);
 }
+#define PORT 6969
+#define BUFSIZE 1024
+
+void url_decode(char *url) {
+    char decoded[strlen(url) + 1];
+    int i, j = 0;
+
+    for (i = 0; i < strlen(url); i++) {
+        if (url[i] == '%' && i + 2 < strlen(url) && isxdigit(url[i + 1]) && isxdigit(url[i + 2])) {
+            // Decode %20-like sequences
+            sscanf(url + i + 1, "%2hhx", &decoded[j]);
+            i += 2;
+        } else if (url[i] == '+') {
+            // Decode '+' to space
+            decoded[j] = ' ';
+        } else {
+            decoded[j] = url[i];
+        }
+
+        j++;
+    }
+
+    decoded[j] = '\0';
+    strcpy(url, decoded);
+}
+
+void send_response(int client_socket, const char *response) {
+    write(client_socket, response, strlen(response));
+}
+
+void send_file(int client_socket, const char *filepath) {
+    int fd = open(filepath, O_RDONLY);
+    if (fd == -1) {
+        const char *not_found_response = "HTTP/1.1 404 Not Found\nContent-Type: text/plain\n\nFile not found\n";
+        send_response(client_socket, not_found_response);
+        return;
+    }
+
+    struct stat file_stat;
+    fstat(fd, &file_stat);
+
+    const char *ok_response = "HTTP/1.1 200 OK\n";
+    write(client_socket, ok_response, strlen(ok_response));
+
+    // Include content type based on file extension (basic example)
+    if (strstr(filepath, ".html")) {
+        const char *content_type = "Content-Type: text/html\n";
+        write(client_socket, content_type, strlen(content_type));
+    } else if (strstr(filepath, ".js")) {
+        const char *content_type = "Content-Type: application/javascript\n";
+        write(client_socket, content_type, strlen(content_type));
+    }
+
+    // Include content length
+    dprintf(client_socket, "Content-Length: %ld\n\n", file_stat.st_size);
+
+    // Read and send the file content
+    char buffer[BUFSIZE];
+    ssize_t read_size;
+    while ((read_size = read(fd, buffer, BUFSIZE)) > 0) {
+        write(client_socket, buffer, read_size);
+    }
+
+    close(fd);
+}
+
+void send2HTML(int client_socket, char *content) {
+    dprintf(client_socket, "<a href='%s' target='_blank'>%s</a><br>\n", content, content);
+}
+#define query_process(content_param, content_param_len, client_socket) \ 
+do{ \
+    Tokenfreqs query = {0}; \
+    Text_builder tb = {0}; \
+    Text tmp = {0};\
+    Ranks ranks = {0}; \
+    strncpy(tmp.content,content_param, content_param_len); \
+    tmp.count = strlen(tmp.content); \
+    da_append(&tb, tmp); \
+    lexer(tb, &query); \ 
+    Tokenfreqs query_freq = {0}; \
+    for(size_t i = 0; i < query.capacity; i++){ \
+        if(query.items[i].ocuppied){\
+            Tokenfreq freq = {0};\
+                freq.token = query.items[i].token;\
+                freq.value = 1;\
+                freq.ocuppied = true;\
+                da_append(&query_freq, freq);\
+        }\
+    }\
+    searchandrankdoc(&query_freq, dires, indexs, &ranks); \
+    for(size_t i = 0; i < ranks.count; i++){  \
+        if(ranks.items[i].score > 0){ \
+            send2HTML(client_socket,ranks.items[i].path.path); \
+        }\
+        else break; \
+    } \
+} while(0)
+
+
+void handle_request(int client_socket) {
+    char buffer[BUFSIZE];
+    ssize_t read_size;
+
+    // Read the HTTP request from the client
+    read_size = read(client_socket, buffer, BUFSIZE - 1);
+    if (read_size > 0) {
+        buffer[read_size] = '\0';
+
+        // Extract the requested path from the HTTP request
+        char *path = strtok(buffer, " ");
+        path = strtok(NULL, " ");
+
+        // If the requested path is "/api/search", handle the API request
+        if (strstr(path, "/api/search") != NULL) {
+            // Extract the content of the text box from the request URL
+            char *query_start = strchr(path, '?');
+            if (query_start != NULL) {
+                // Move to the start of the query parameters
+                query_start++;
+
+                // Extract the content parameter
+                char *content_param = strstr(query_start, "content=");
+                if (content_param != NULL) {
+                    // Move to the start of the content value
+                    content_param += strlen("content=");
+
+                    // Find the end of the content value
+                    char *content_end = strchr(content_param, '&');
+                    if (content_end == NULL) {
+                        // If there is no "&", consider the content until the end of the string
+                        content_end = content_param + strlen(content_param);
+                    }
+                    url_decode(content_param);
+                    const char *response_header = "HTTP/1.1 200 OK\nContent-Type: text/html\n\n";
+                    send_response(client_socket, response_header);
+                    dprintf(client_socket, "Content: ");
+                    query_process(content_param,(int)(content_end - content_param), client_socket);
+
+                    printf("Content of the text box: %.*s\n", (int)(content_end - content_param), content_param);
+                }
+            }
+
+
+        } else {
+            // If not an API request, treat it as a file request
+            // Replace "/" with "/index.html" for default page
+            if (strcmp(path, "/") == 0) {
+                strcpy(path, "/index.html");
+            }
+
+            // Build the full path to the requested file
+            char filepath[256];
+            snprintf(filepath, sizeof(filepath), ".%s", path);
+
+            // Send the requested file
+            send_file(client_socket, filepath);
+        }
+    }
+
+    // Close the client socket
+    close(client_socket);
+}
 
 int main(int argc, char **argv){
-    
-    if(argc != 2){
+
+    if(argc < 2){
         fprintf(stderr, "usage: %s <dir>\n", argv[0]);
+        fprintf(stderr, "%s  serve <dir>\n", argv[0]);
         return 1;
     }
-    char *dir_path = argv[1];
 
-    Dires dires = {0};
-    read_entire_dir(dir_path, &dires);
-    Indexs indexs = {0};
-    indexing(dires, &indexs);
+    if(strcmp(argv[1], "serve") == 0){
+        int server_socket, client_socket;
+        struct sockaddr_in server_addr, client_addr;
+        socklen_t client_len = sizeof(client_addr);
 
-    puts("indexing done");
-    while(true){
-        Tokenfreqs query = {0};
-        Text_builder tb = {0};
-        Text tmp = {0};
-        char buf[256]={0};
-        Ranks ranks = {0};
+        // Create socket
+        server_socket = socket(AF_INET, SOCK_STREAM, 0);
+        if (server_socket == -1) {
+            perror("Error creating socket");
+            exit(EXIT_FAILURE);
+        }
 
-        puts("++++++++++++++++++++++++++++++++++++++++++++++++");
+        // Set up server address structure
+        server_addr.sin_family = AF_INET;
+        server_addr.sin_addr.s_addr = INADDR_ANY;
+        server_addr.sin_port = htons(PORT);
 
-        printf("search: ");
-        fgets(buf, ARRLEN(buf), stdin);
-        strcpy(tmp.content, buf);
-        tmp.count = strlen(tmp.content);
-        da_append(&tb, tmp);
-        lexer(tb, &query);
+        // Bind the socket
+        if (bind(server_socket, (struct sockaddr *)&server_addr, sizeof(server_addr)) < 0) {
+            perror("Error binding socket");
+            exit(EXIT_FAILURE);
+        }
+
+        // Listen for incoming connections
+        if (listen(server_socket, 5) < 0) {
+            perror("Error listening");
+            exit(EXIT_FAILURE);
+        }
+
+        printf("Server listening on port %d...\n", PORT);
+
+        char *dir_path = argv[2];
+        read_entire_dir(dir_path, &dires);
+        indexing(dires, &indexs);
+
+        puts("indexing done");
+        while (true) {
+            client_socket = accept(server_socket, (struct sockaddr *)&client_addr, &client_len);
+            if (client_socket < 0) {
+                perror("Error accepting connection");
+                continue;
+            }
+
+            handle_request(client_socket);
+        }
+        close(server_socket);
+        close(client_socket);
+    }else{
+
+        char *dir_path = argv[1];
+        read_entire_dir(dir_path, &dires);
+        indexing(dires, &indexs);
+        puts("indexing done");
+        while(true){
+            Tokenfreqs query = {0};
+            Text_builder tb = {0};
+            Text tmp = {0};
+            char buf[256]={0};
+            Ranks ranks = {0};
+
+            puts("++++++++++++++++++++++++++++++++++++++++++++++++");
+
+            printf("search: ");
+            fgets(buf, ARRLEN(buf), stdin);
+            strcpy(tmp.content, buf);
+            tmp.count = strlen(tmp.content);
+            da_append(&tb, tmp);
+            lexer(tb, &query);
 
 
-        Tokenfreqs query_freq = {0};
-        for(size_t i = 0; i < query.capacity; i++){
-            if(query.items[i].ocuppied){
-                Tokenfreq freq = {0};
-                freq.token = query.items[i].token;
-                freq.value = 1;
-                freq.ocuppied = true;
-                da_append(&query_freq, freq);
+            Tokenfreqs query_freq = {0};
+            for(size_t i = 0; i < query.capacity; i++){
+                if(query.items[i].ocuppied){
+                    Tokenfreq freq = {0};
+                    freq.token = query.items[i].token;
+                    freq.value = 1;
+                    freq.ocuppied = true;
+                    da_append(&query_freq, freq);
+                }
+            }
+
+            puts("++++++++++++++++++++++++++++++++++++++++++++++++");
+            puts("search result:");
+            searchandrankdoc(&query_freq, dires, indexs, &ranks);
+            for(size_t i = 0; i < ranks.count; i++){
+                if(ranks.items[i].score > 0)
+                    printf("\t%s\n", ranks.items[i].path.path );
+                else break;
             }
         }
-
-        puts("++++++++++++++++++++++++++++++++++++++++++++++++");
-        puts("search result:");
-        searchandrankdoc(&query_freq, dires, indexs, &ranks);
-        for(size_t i = 0; i < ranks.count; i++){
-            if(ranks.items[i].score > 0)
-                printf("\t%s\n", ranks.items[i].path.path );
-            else break;
-        }
-
     }
-    // for(size_t i = 0; i < dires.count; i++){
-    //     printf("%s\n", dires.items[i].path);
-    // }
-    // Text_builder tb = {0};
-    //
-    // Tokenfreqs map = {0};
-    //
-    // Tokenfreqs freq = {0};
-    // // read_entire_file(file, &tb);
-    // // lexer(tb, &map);
-    // // size_t value = 0;
-    // // hm_get(&map, (Token){.token = "the",.count=3}, &value);
-    // // printf("%zu\n", value);
-    // for(size_t j =0; j < map.capacity; j++){
-    //     if(map.items[j].ocuppied)
-    //         da_append(&freq, map.items[j]);
-    // }
-    // qsort(freq.items, freq.count, sizeof(Tokenfreq),compare_tokenfreq);
-    // for(size_t i =0 ; i <freq.count; i++){
-    //     printf("%s: %zu\n", freq.items[i].token.token, freq.items[i].value);
-    // }
 
     return 0;
 }
